@@ -27,18 +27,17 @@ const segmentText = (text: string): string[] => {
 
 export default function DatabaseBridge() {
   const { client, connected, getAudioStreamerState, feedAudio } = useLiveAPIContext();
-  const { addTurn } = useLogStore();
-  const { voiceStyle, speechRate } = useSettings();
+  const { addTurn, updateLastTurn } = useLogStore();
+  const { voiceStyle, speechRate, language } = useSettings();
   
   const lastProcessedIdRef = useRef<string | null>(null);
   const paragraphCountRef = useRef<number>(0);
   
   const voiceStyleRef = useRef(voiceStyle);
   const speechRateRef = useRef(speechRate);
+  const languageRef = useRef(language);
 
   // Initialize independent GenAI client for Text Logic & TTS (REST)
-  // This bypasses the WebSocket "Live API" model for the audio generation part
-  // to support advanced features like Multi-Speaker output.
   const genAI = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY || '' }), []);
 
   useEffect(() => {
@@ -49,34 +48,43 @@ export default function DatabaseBridge() {
     speechRateRef.current = speechRate;
   }, [speechRate]);
 
+  useEffect(() => {
+    languageRef.current = language;
+  }, [language]);
+
   // High-performance queue using Refs
   const queueRef = useRef<string[]>([]);
   const isProcessingRef = useRef(false);
 
-  // Multi-speaker Detection & Audio Generation Logic
-  const processTextAndGenerateAudio = async (text: string) => {
+  // 1. Diarization & Translation Logic (Gemini Flash)
+  const diarizeAndTranslate = async (text: string, targetLanguage: string): Promise<string> => {
     try {
-      // 1. Detect Gender and Assign Speakers using Gemini Flash
       const analysisResponse = await genAI.models.generateContent({
         model: GEMINI_FLASH_MODEL,
         contents: `
-          You are a script formatter.
-          Analyze the following text.
-          1. Identify distinct speakers.
-          2. Assign a label 'Male 1', 'Female 1', 'Male 2', 'Female 2' to them based on context or names.
-          3. If only one speaker is detected, use 'Male 1' as default.
-          4. Rewrite the text strictly in the format: "Speaker: Text".
-          5. Keep the content exactly as is, just add speaker labels.
-          6. Do NOT add any markdown, intro, or outro.
+          You are a strict translator and script formatter.
+          TASK:
+          1. Translate the following text into [${targetLanguage}].
+          2. Identify distinct speakers.
+          3. Assign a label 'Male 1', 'Female 1', 'Male 2', 'Female 2' to them based on context or names in the source.
+          4. If only one speaker is detected, use 'Male 1' as default.
+          5. Rewrite the text strictly in the format: "Speaker Label: Translated Text".
+          6. Do NOT add any markdown, intro, or outro. 
+          7. Maintain stage directions in parentheses if present, translated.
 
-          Text: "${text}"
+          Source Text: "${text}"
         `
       });
+      return analysisResponse.text?.trim() || `Male 1: ${text}`;
+    } catch (error) {
+      console.error('Diarization/Translation failed:', error);
+      return `Male 1: ${text}`;
+    }
+  };
 
-      const script = analysisResponse.text?.trim() || `Male 1: ${text}`;
-      console.log('[Speaker Analysis]', script);
-
-      // 2. Generate Audio using Gemini TTS with Multi-Speaker Config
+  // 2. Audio Generation Logic (Gemini TTS Multi-Speaker)
+  const generateMultiSpeakerAudio = async (script: string) => {
+    try {
       const ttsResponse = await genAI.models.generateContent({
         model: GEMINI_TTS_MODEL,
         contents: [{ parts: [{ text: script }] }],
@@ -107,7 +115,6 @@ export default function DatabaseBridge() {
         }
       });
 
-      // 3. Extract and Feed Audio
       const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (audioBase64) {
         const audioBuffer = base64ToArrayBuffer(audioBase64);
@@ -115,7 +122,7 @@ export default function DatabaseBridge() {
         return true;
       }
     } catch (error) {
-      console.error('Error in Smart TTS pipeline:', error);
+      console.error('TTS Generation failed:', error);
     }
     return false;
   };
@@ -128,61 +135,44 @@ export default function DatabaseBridge() {
 
     if (!connected) return;
 
-    // The consumer loop that processes the queue sequentially (Closed Loop Control)
+    // The consumer loop that processes the queue sequentially
     const processQueueLoop = async () => {
       if (isProcessingRef.current) return;
       isProcessingRef.current = true;
 
       try {
         while (queueRef.current.length > 0) {
-          // Safety check
           if (client.status !== 'connected') {
             isProcessingRef.current = false;
             return;
           }
 
-          const rawText = queueRef.current[0];
-          const style = voiceStyleRef.current;
+          const scriptedText = queueRef.current[0];
           
-          let scriptedText = rawText;
-          if (rawText !== '(clears throat)') {
-             if (style === 'breathy') {
-               scriptedText = `(soft inhale) ${rawText} ... (pause)`;
-             } else if (style === 'dramatic') {
-                scriptedText = `(slowly) ${rawText} ... (long pause)`;
-             }
-          }
-
           if (!scriptedText || !scriptedText.trim()) {
             queueRef.current.shift();
             continue;
           }
 
-          // Capture audio state BEFORE sending
           const preSendState = getAudioStreamerState();
 
-          // >>> SWITCH TO SMART TTS PIPELINE <<<
-          // We use the REST API for generation to support multi-speaker,
-          // instead of client.send (Websocket).
+          // >>> GENERATE AUDIO <<<
+          // Text is already translated and diarized (e.g. "Male 1: Hola")
+          const success = await generateMultiSpeakerAudio(scriptedText);
           
-          // Try Smart Pipeline first
-          const success = await processTextAndGenerateAudio(scriptedText);
-          
-          // Fallback to basic Live API if Smart Pipeline fails (e.g. quota or model error)
+          // Fallback
           if (!success) {
-             client.send([{ text: scriptedText }]);
+             const cleanText = scriptedText.replace(/^(Male|Female) \d:\s*/i, '');
+             client.send([{ text: cleanText }]);
           }
           
           queueRef.current.shift();
 
-          // 2. Wait for Audio to ARRIVE (Scheduled Time Increases)
-          // This confirms the model has responded and we have queued the audio.
-          // We wait up to 15 seconds for the response to start arriving.
+          // Wait logic (pipelining)
           const waitStart = Date.now();
           let audioArrived = false;
           while (Date.now() - waitStart < 15000) {
              const currentState = getAudioStreamerState();
-             // Check if endOfQueueTime has increased by at least 100ms
              if (currentState.endOfQueueTime > preSendState.endOfQueueTime + 0.1) {
                 audioArrived = true;
                 break;
@@ -191,19 +181,12 @@ export default function DatabaseBridge() {
           }
 
           if (!audioArrived) {
-            console.warn("Timeout waiting for audio response from model. Moving to next chunk.");
-            // We proceed to next chunk anyway to avoid stalling forever
+            console.warn("Timeout waiting for audio response.");
           }
 
-          // 3. Pipelining Wait: Wait until remaining audio duration is < 3 seconds
-          // This allows us to send the next request early, reducing the inter-paragraph gap.
           while (true) {
              const state = getAudioStreamerState();
-             // If audio queue is getting empty (less than 3s left), break to send next
-             // Also break if queue is completely empty (duration 0)
-             if (state.duration < 3.0) {
-                break;
-             }
+             if (state.duration < 3.0) break;
              await new Promise(resolve => setTimeout(resolve, 200));
           }
         }
@@ -218,14 +201,14 @@ export default function DatabaseBridge() {
       processQueueLoop();
     }
 
-    const processNewData = (data: Transcript) => {
+    const processNewData = async (data: Transcript) => {
       const source = data.full_transcript_text;
       if (!data || !source) return;
 
       if (lastProcessedIdRef.current === data.id) return;
       lastProcessedIdRef.current = data.id;
       
-      // Update UI
+      // 1. Show Raw Text Immediately
       addTurn({
         role: 'system',
         text: source, 
@@ -233,15 +216,18 @@ export default function DatabaseBridge() {
         isFinal: true
       });
 
-      // Queue Paragraphs
-      const segments = segmentText(source);
+      // 2. Diarize & Translate asynchronously
+      const targetLang = languageRef.current || 'English';
+      const diarizedScript = await diarizeAndTranslate(source, targetLang);
+      
+      // 3. Update UI with Diarized Script
+      updateLastTurn({ text: diarizedScript });
+
+      // 4. Queue for Audio Generation
+      const segments = segmentText(diarizedScript);
       if (segments.length > 0) {
         segments.forEach(seg => {
            queueRef.current.push(seg);
-           paragraphCountRef.current += 1;
-           if (paragraphCountRef.current > 0 && paragraphCountRef.current % 3 === 0) {
-              queueRef.current.push('(clears throat)');
-           }
         });
         processQueueLoop();
       }
@@ -260,7 +246,7 @@ export default function DatabaseBridge() {
       }
     };
 
-    // Initialize Web Worker for background polling
+    // Initialize Web Worker
     const blob = new Blob([workerScript], { type: 'application/javascript' });
     const worker = new Worker(URL.createObjectURL(blob));
     worker.onmessage = () => {
@@ -268,7 +254,7 @@ export default function DatabaseBridge() {
     };
     worker.postMessage('start');
 
-    // Setup Realtime Subscription
+    // Realtime Subscription
     const channel = supabase
       .channel('bridge-realtime-opt')
       .on(
@@ -288,7 +274,7 @@ export default function DatabaseBridge() {
       worker.terminate();
       supabase.removeChannel(channel);
     };
-  }, [connected, client, addTurn, getAudioStreamerState, genAI, feedAudio]);
+  }, [connected, client, addTurn, updateLastTurn, getAudioStreamerState, genAI, feedAudio]);
 
   return null;
 }

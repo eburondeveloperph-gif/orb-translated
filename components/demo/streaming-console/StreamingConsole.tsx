@@ -12,17 +12,22 @@ import {
   useTools,
 } from '@/lib/state';
 
-// Helper component for Teleprompter Script Effect with Typewriter
+// Helper component for Teleprompter Script Effect with Typewriter and Speaker Coloring
 const ScriptReader = memo(({ text }: { text: string }) => {
   const [displayedText, setDisplayedText] = useState('');
   
   useEffect(() => {
     let index = 0;
-    // Reset when text changes (new log entry usually implies new text)
+    // Reset when text changes 
+    // Optimization: Check if displayedText is already a substring of new text to avoid full reset if just appending
     if (text === displayedText) return;
     
-    // Calculate typing speed - faster for long text to keep up, but minimum readable speed
-    const typingSpeed = 20; 
+    // If text changed completely, reset
+    // If text is just the diarized version replacing raw version, we might want to type it out or show immediately.
+    // For smoother UX on replace: show immediately if length difference is small or context similar? 
+    // For now, let's re-type it fast to show the "correction" effect.
+    
+    const typingSpeed = 10; // Faster typing for updates
 
     const interval = setInterval(() => {
       setDisplayedText((prev) => {
@@ -38,19 +43,43 @@ const ScriptReader = memo(({ text }: { text: string }) => {
     return () => clearInterval(interval);
   }, [text]);
 
-  // Simple parser to separate stage directions from spoken text
-  // Directions are in parentheses () or brackets []
-  const parts = displayedText.split(/([(\[].*?[)\]])/g);
+  // Regex to split by Speaker Labels: "Male 1:", "Female 1:", etc.
+  // Also handles stage directions.
+  // We split by capturing groups to keep the delimiters.
+  // Pattern: ((?:Male|Female) \d:|Speaker \d:|Host:|Guest:)
+  const parts = displayedText.split(/((?:Male|Female) \d:|Speaker \d:|Host:|Guest:)/g);
 
   return (
     <div className="script-line">
       {parts.map((part, index) => {
-        if (part.match(/^[(\[].*[)\]]$/)) {
-          // It's a stage direction
-          return <span key={index} className="script-direction">{part}</span>;
+        const trimmed = part.trim();
+        
+        // Check for Speaker Label
+        if (trimmed.match(/^(Male 1|Speaker 1|Host):?$/i)) {
+          return <span key={index} className="speaker-label male-1">{trimmed}</span>;
         }
-        // It's spoken text
-        return <span key={index} className="script-spoken">{part}</span>;
+        if (trimmed.match(/^(Female 1|Speaker 2|Guest):?$/i)) {
+          return <span key={index} className="speaker-label female-1">{trimmed}</span>;
+        }
+        if (trimmed.match(/^(Male 2|Speaker 3):?$/i)) {
+          return <span key={index} className="speaker-label male-2">{trimmed}</span>;
+        }
+        if (trimmed.match(/^(Female 2|Speaker 4):?$/i)) {
+          return <span key={index} className="speaker-label female-2">{trimmed}</span>;
+        }
+
+        // Process content for stage directions
+        const subParts = part.split(/([(\[].*?[)\]])/g);
+        return (
+          <span key={index}>
+            {subParts.map((sub, subIdx) => {
+               if (sub.match(/^[(\[].*[)\]]$/)) {
+                 return <span key={`${index}-${subIdx}`} className="script-direction">{sub}</span>;
+               }
+               return <span key={`${index}-${subIdx}`} className="script-spoken">{sub}</span>;
+            })}
+          </span>
+        );
       })}
     </div>
   );
@@ -94,7 +123,6 @@ export default function StreamingConsole() {
           },
         },
       },
-      // Updated to use empty objects as per latest API spec for default models
       inputAudioTranscription: {},
       outputAudioTranscription: {},
       systemInstruction: { parts: [{ text: systemPrompt }] }, 
@@ -120,27 +148,11 @@ export default function StreamingConsole() {
   }, [setConfig, systemPrompt, tools, voice]);
 
   useEffect(() => {
-    const { addTurn, updateLastTurn } = useLogStore.getState();
-
-    // We only care about errors or keeping the connection alive, 
-    // we do NOT want to log the transcription for the user to see in this specific mode.
-    // However, we still listen to maintain protocol state.
-
-    const handleInputTranscription = (text: string, isFinal: boolean) => {
-       // Suppressed for Script View
-    };
-
-    const handleOutputTranscription = (text: string, isFinal: boolean) => {
-       // Suppressed for Script View
-    };
-
-    const handleContent = (serverContent: LiveServerContent) => {
-       // Suppressed for Script View
-    };
-
-    const handleTurnComplete = () => {
-       // Suppressed
-    };
+    // Suppress transcriptions from Live API as we drive UI via Supabase
+    const handleInputTranscription = () => {};
+    const handleOutputTranscription = () => {};
+    const handleContent = () => {};
+    const handleTurnComplete = () => {};
 
     client.on('inputTranscription', handleInputTranscription);
     client.on('outputTranscription', handleOutputTranscription);
@@ -167,6 +179,28 @@ export default function StreamingConsole() {
 
   return (
     <div className="streaming-console-layout">
+      <style>{`
+        .speaker-label {
+          font-weight: bold;
+          font-size: 0.8em;
+          text-transform: uppercase;
+          margin-right: 8px;
+          padding: 2px 6px;
+          border-radius: 4px;
+          display: inline-block;
+          margin-bottom: 4px;
+        }
+        .speaker-label.male-1 { background-color: rgba(66, 133, 244, 0.2); color: #8ab4f8; border: 1px solid #4285f4; }
+        .speaker-label.female-1 { background-color: rgba(52, 168, 83, 0.2); color: #81c995; border: 1px solid #34a853; }
+        .speaker-label.male-2 { background-color: rgba(251, 188, 4, 0.2); color: #fdd663; border: 1px solid #fbbc04; }
+        .speaker-label.female-2 { background-color: rgba(234, 67, 53, 0.2); color: #f28b82; border: 1px solid #ea4335; }
+        
+        /* Light mode overrides */
+        [data-theme='light'] .speaker-label.male-1 { background-color: #e8f0fe; color: #1967d2; border-color: #aecbfa; }
+        [data-theme='light'] .speaker-label.female-1 { background-color: #e6f4ea; color: #137333; border-color: #a8dab5; }
+        [data-theme='light'] .speaker-label.male-2 { background-color: #fef7e0; color: #ea8600; border-color: #fde293; }
+        [data-theme='light'] .speaker-label.female-2 { background-color: #fce8e6; color: #c5221f; border-color: #f6aea9; }
+      `}</style>
       <DigitalClock />
       
       <div className="transcription-container">
