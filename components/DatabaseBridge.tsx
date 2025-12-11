@@ -6,7 +6,7 @@ import { useEffect, useRef, useMemo } from 'react';
 import { supabase, Transcript, isSupabaseConfigured } from '../lib/supabase';
 import { useLiveAPIContext } from '../contexts/LiveAPIContext';
 import { useLogStore, useSettings } from '../lib/state';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, GenerateContentResponse } from '@google/genai';
 import { GEMINI_FLASH_MODEL, GEMINI_TTS_MODEL } from '../lib/constants';
 import { base64ToArrayBuffer } from '../lib/utils';
 
@@ -25,20 +25,35 @@ const segmentText = (text: string): string[] => {
   return text.split(/\r?\n+/).map(t => t.trim()).filter(t => t.length > 0);
 };
 
+// Retry helper for 503s
+async function fetchWithRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      const isUnavailable = error.message?.includes('503') || error.message?.includes('unavailable') || error.status === 503;
+      if (i === retries - 1 || !isUnavailable) throw error;
+      
+      console.warn(`Attempt ${i + 1} failed with 503/Unavailable. Retrying in ${delay}ms...`);
+      await new Promise(res => setTimeout(res, delay * Math.pow(2, i))); // Exponential backoff
+    }
+  }
+  throw new Error('Max retries reached');
+}
+
 export default function DatabaseBridge() {
-  const { client, connected, getAudioStreamerState, feedAudio } = useLiveAPIContext();
+  const { client, connected, getAudioStreamerState, feedAudio, apiKey } = useLiveAPIContext();
   const { addTurn, updateLastTurn } = useLogStore();
   const { voiceStyle, speechRate, language } = useSettings();
   
   const lastProcessedIdRef = useRef<string | null>(null);
-  const paragraphCountRef = useRef<number>(0);
   
   const voiceStyleRef = useRef(voiceStyle);
   const speechRateRef = useRef(speechRate);
   const languageRef = useRef(language);
 
-  // Initialize independent GenAI client for Text Logic & TTS (REST)
-  const genAI = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY || '' }), []);
+  // Initialize independent GenAI client using the apiKey passed from Context (guaranteed to be consistent)
+  const genAI = useMemo(() => new GoogleGenAI({ apiKey: apiKey }), [apiKey]);
 
   useEffect(() => {
     voiceStyleRef.current = voiceStyle;
@@ -56,10 +71,10 @@ export default function DatabaseBridge() {
   const queueRef = useRef<string[]>([]);
   const isProcessingRef = useRef(false);
 
-  // 1. Diarization & Translation Logic (Gemini Flash)
+  // 1. Diarization & Translation Logic (Gemini Flash) with Retry
   const diarizeAndTranslate = async (text: string, targetLanguage: string): Promise<string> => {
     try {
-      const analysisResponse = await genAI.models.generateContent({
+      const analysisResponse = await fetchWithRetry<GenerateContentResponse>(() => genAI.models.generateContent({
         model: GEMINI_FLASH_MODEL,
         contents: `
           You are a strict translator and script formatter.
@@ -74,18 +89,19 @@ export default function DatabaseBridge() {
 
           Source Text: "${text}"
         `
-      });
+      }));
       return analysisResponse.text?.trim() || `Male 1: ${text}`;
     } catch (error) {
-      console.error('Diarization/Translation failed:', error);
+      console.error('Diarization/Translation failed after retries:', error);
+      // Fallback: Just assume Male 1 and raw text
       return `Male 1: ${text}`;
     }
   };
 
-  // 2. Audio Generation Logic (Gemini TTS Multi-Speaker)
+  // 2. Audio Generation Logic (Gemini TTS Multi-Speaker) with Retry
   const generateMultiSpeakerAudio = async (script: string) => {
     try {
-      const ttsResponse = await genAI.models.generateContent({
+      const ttsResponse = await fetchWithRetry<GenerateContentResponse>(() => genAI.models.generateContent({
         model: GEMINI_TTS_MODEL,
         contents: [{ parts: [{ text: script }] }],
         config: {
@@ -113,7 +129,7 @@ export default function DatabaseBridge() {
             }
           }
         }
-      });
+      }));
 
       const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (audioBase64) {
@@ -122,7 +138,7 @@ export default function DatabaseBridge() {
         return true;
       }
     } catch (error) {
-      console.error('TTS Generation failed:', error);
+      console.error('TTS Generation failed after retries:', error);
     }
     return false;
   };
@@ -274,7 +290,7 @@ export default function DatabaseBridge() {
       worker.terminate();
       supabase.removeChannel(channel);
     };
-  }, [connected, client, addTurn, updateLastTurn, getAudioStreamerState, genAI, feedAudio]);
+  }, [connected, client, addTurn, updateLastTurn, getAudioStreamerState, genAI, feedAudio, apiKey]);
 
   return null;
 }

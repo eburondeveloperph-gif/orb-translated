@@ -30,6 +30,7 @@ export type UseLiveApiResults = {
   client: GenAILiveClient;
   setConfig: (config: LiveConnectConfig) => void;
   config: LiveConnectConfig;
+  apiKey: string;
 
   connect: () => Promise<void>;
   disconnect: () => void;
@@ -236,6 +237,7 @@ export function useLiveApi({
     client,
     config,
     setConfig,
+    apiKey,
     connect,
     connected,
     disconnect,
