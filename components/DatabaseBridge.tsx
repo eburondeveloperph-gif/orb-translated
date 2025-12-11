@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import { useEffect, useRef } from 'react';
-import { supabase, Transcript } from '../lib/supabase';
+import { supabase, Transcript, isSupabaseConfigured } from '../lib/supabase';
 import { useLiveAPIContext } from '../contexts/LiveAPIContext';
 import { useLogStore, useSettings } from '../lib/state';
 
@@ -47,6 +47,8 @@ export default function DatabaseBridge() {
 
   // Data Ingestion & Processing Logic
   useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+
     isProcessingRef.current = false;
 
     if (!connected) return;

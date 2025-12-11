@@ -22,7 +22,7 @@
  * Default Live API model to use.
  */
 export const DEFAULT_LIVE_API_MODEL =
-  'models/gemini-2.5-flash-native-audio-preview-09-2025';
+  'gemini-2.5-flash-native-audio-preview-09-2025';
 
 export const DEFAULT_VOICE = 'Orus';
 

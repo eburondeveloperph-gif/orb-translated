@@ -6,7 +6,7 @@ import { useSettings, useUI, VoiceStyle } from '@/lib/state';
 import c from 'classnames';
 import { useLiveAPIContext } from '@/contexts/LiveAPIContext';
 import { useEffect, useState } from 'react';
-import { supabase, Transcript } from '@/lib/supabase';
+import { supabase, Transcript, isSupabaseConfigured } from '@/lib/supabase';
 import { SUPPORTED_LANGUAGES, AVAILABLE_VOICES } from '@/lib/constants';
 
 export default function Sidebar() {
@@ -23,6 +23,8 @@ export default function Sidebar() {
   const [dbData, setDbData] = useState<Transcript | null>(null);
 
   useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+
     // Initial fetch
     supabase
       .from('transcripts')
@@ -66,28 +68,34 @@ export default function Sidebar() {
           <div className="sidebar-section">
             <h4 className="sidebar-section-title">Database Monitor</h4>
             <div style={{ fontSize: '12px', background: 'var(--bg-panel-secondary)', padding: '10px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-              {dbData ? (
-                <>
-                  <div style={{ marginBottom: '8px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '10px', textTransform: 'uppercase' }}>Current ID: {dbData.id.substring(0, 8)}...</div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>{new Date(dbData.updated_at).toLocaleTimeString()}</div>
-                  </div>
-                  <div style={{ marginBottom: '12px' }}>
-                     <strong style={{color: 'var(--accent-blue)'}}>Source ({dbData.source_language || '?'}):</strong><br />
-                     <div style={{ color: 'var(--text-main)', marginTop: '4px', fontStyle: 'italic', maxHeight: '100px', overflowY: 'auto' }}>
-                       "{dbData.full_transcript_text?.substring(0, 200)}{dbData.full_transcript_text?.length > 200 ? '...' : ''}"
-                     </div>
-                  </div>
-                  <div>
-                    <strong style={{color: 'var(--accent-green)'}}>Processing Status:</strong><br />
-                    <div style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>Sent to Audio Engine</div>
-                  </div>
-                </>
+              {isSupabaseConfigured() ? (
+                  dbData ? (
+                    <>
+                      <div style={{ marginBottom: '8px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '10px', textTransform: 'uppercase' }}>Current ID: {dbData.id.substring(0, 8)}...</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>{new Date(dbData.updated_at).toLocaleTimeString()}</div>
+                      </div>
+                      <div style={{ marginBottom: '12px' }}>
+                         <strong style={{color: 'var(--accent-blue)'}}>Source ({dbData.source_language || '?'}):</strong><br />
+                         <div style={{ color: 'var(--text-main)', marginTop: '4px', fontStyle: 'italic', maxHeight: '100px', overflowY: 'auto' }}>
+                           "{dbData.full_transcript_text?.substring(0, 200)}{dbData.full_transcript_text?.length > 200 ? '...' : ''}"
+                         </div>
+                      </div>
+                      <div>
+                        <strong style={{color: 'var(--accent-green)'}}>Processing Status:</strong><br />
+                        <div style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>Sent to Audio Engine</div>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+                      <span className="material-symbols-outlined" style={{fontSize: '16px', animation: 'spin 2s linear infinite'}}>sync</span>
+                      Connecting to Eburon DB...
+                    </div>
+                  )
               ) : (
-                <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
-                  <span className="material-symbols-outlined" style={{fontSize: '16px', animation: 'spin 2s linear infinite'}}>sync</span>
-                  Connecting to Eburon DB...
-                </div>
+                  <div style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                    Supabase credentials not configured. <br/> Monitoring disabled.
+                  </div>
               )}
             </div>
           </div>

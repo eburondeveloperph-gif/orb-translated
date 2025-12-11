@@ -8,6 +8,11 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 
+// Check if credentials are valid
+export const isSupabaseConfigured = () => {
+    return SUPABASE_URL !== '' && SUPABASE_KEY !== '' && !SUPABASE_URL.includes('placeholder');
+};
+
 // If credentials are missing, create a client that won't error out immediately but won't connect
 // This prevents "Network Error" on app load if Supabase is not configured, while keeping the app structure valid.
 export const supabase = createClient(
