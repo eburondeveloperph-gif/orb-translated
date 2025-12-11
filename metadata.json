@@ -1,0 +1,7 @@
+{
+  "name": "zoom-translator",
+  "description": "An interactive sandbox",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
