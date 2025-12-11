@@ -24,6 +24,9 @@
 export const DEFAULT_LIVE_API_MODEL =
   'gemini-2.5-flash-native-audio-preview-09-2025';
 
+export const GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
+export const GEMINI_TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+
 export const DEFAULT_VOICE = 'Orus';
 
 export const AVAILABLE_VOICES = [

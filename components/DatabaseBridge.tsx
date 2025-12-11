@@ -2,10 +2,13 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useMemo } from 'react';
 import { supabase, Transcript, isSupabaseConfigured } from '../lib/supabase';
 import { useLiveAPIContext } from '../contexts/LiveAPIContext';
 import { useLogStore, useSettings } from '../lib/state';
+import { GoogleGenAI, Modality } from '@google/genai';
+import { GEMINI_FLASH_MODEL, GEMINI_TTS_MODEL } from '../lib/constants';
+import { base64ToArrayBuffer } from '../lib/utils';
 
 // Worker script to ensure polling continues even when tab is in background
 const workerScript = `
@@ -23,7 +26,7 @@ const segmentText = (text: string): string[] => {
 };
 
 export default function DatabaseBridge() {
-  const { client, connected, getAudioStreamerState } = useLiveAPIContext();
+  const { client, connected, getAudioStreamerState, feedAudio } = useLiveAPIContext();
   const { addTurn } = useLogStore();
   const { voiceStyle, speechRate } = useSettings();
   
@@ -32,6 +35,11 @@ export default function DatabaseBridge() {
   
   const voiceStyleRef = useRef(voiceStyle);
   const speechRateRef = useRef(speechRate);
+
+  // Initialize independent GenAI client for Text Logic & TTS (REST)
+  // This bypasses the WebSocket "Live API" model for the audio generation part
+  // to support advanced features like Multi-Speaker output.
+  const genAI = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY || '' }), []);
 
   useEffect(() => {
     voiceStyleRef.current = voiceStyle;
@@ -44,6 +52,73 @@ export default function DatabaseBridge() {
   // High-performance queue using Refs
   const queueRef = useRef<string[]>([]);
   const isProcessingRef = useRef(false);
+
+  // Multi-speaker Detection & Audio Generation Logic
+  const processTextAndGenerateAudio = async (text: string) => {
+    try {
+      // 1. Detect Gender and Assign Speakers using Gemini Flash
+      const analysisResponse = await genAI.models.generateContent({
+        model: GEMINI_FLASH_MODEL,
+        contents: `
+          You are a script formatter.
+          Analyze the following text.
+          1. Identify distinct speakers.
+          2. Assign a label 'Male 1', 'Female 1', 'Male 2', 'Female 2' to them based on context or names.
+          3. If only one speaker is detected, use 'Male 1' as default.
+          4. Rewrite the text strictly in the format: "Speaker: Text".
+          5. Keep the content exactly as is, just add speaker labels.
+          6. Do NOT add any markdown, intro, or outro.
+
+          Text: "${text}"
+        `
+      });
+
+      const script = analysisResponse.text?.trim() || `Male 1: ${text}`;
+      console.log('[Speaker Analysis]', script);
+
+      // 2. Generate Audio using Gemini TTS with Multi-Speaker Config
+      const ttsResponse = await genAI.models.generateContent({
+        model: GEMINI_TTS_MODEL,
+        contents: [{ parts: [{ text: script }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            multiSpeakerVoiceConfig: {
+              speakerVoiceConfigs: [
+                {
+                    speaker: 'Male 1',
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } }
+                },
+                {
+                    speaker: 'Female 1',
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } }
+                },
+                {
+                    speaker: 'Male 2',
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Orus' } }
+                },
+                {
+                    speaker: 'Female 2',
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
+                }
+              ]
+            }
+          }
+        }
+      });
+
+      // 3. Extract and Feed Audio
+      const audioBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (audioBase64) {
+        const audioBuffer = base64ToArrayBuffer(audioBase64);
+        feedAudio(new Uint8Array(audioBuffer));
+        return true;
+      }
+    } catch (error) {
+      console.error('Error in Smart TTS pipeline:', error);
+    }
+    return false;
+  };
 
   // Data Ingestion & Processing Logic
   useEffect(() => {
@@ -86,8 +161,18 @@ export default function DatabaseBridge() {
           // Capture audio state BEFORE sending
           const preSendState = getAudioStreamerState();
 
-          // 1. Send text to model
-          client.send([{ text: scriptedText }]);
+          // >>> SWITCH TO SMART TTS PIPELINE <<<
+          // We use the REST API for generation to support multi-speaker,
+          // instead of client.send (Websocket).
+          
+          // Try Smart Pipeline first
+          const success = await processTextAndGenerateAudio(scriptedText);
+          
+          // Fallback to basic Live API if Smart Pipeline fails (e.g. quota or model error)
+          if (!success) {
+             client.send([{ text: scriptedText }]);
+          }
+          
           queueRef.current.shift();
 
           // 2. Wait for Audio to ARRIVE (Scheduled Time Increases)
@@ -203,7 +288,7 @@ export default function DatabaseBridge() {
       worker.terminate();
       supabase.removeChannel(channel);
     };
-  }, [connected, client, addTurn, getAudioStreamerState]);
+  }, [connected, client, addTurn, getAudioStreamerState, genAI, feedAudio]);
 
   return null;
 }

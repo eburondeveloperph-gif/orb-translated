@@ -40,6 +40,7 @@ export type UseLiveApiResults = {
   setIsVolumeEnabled: (isEnabled: boolean) => void;
   isAudioPlaying: boolean;
   getAudioStreamerState: () => { duration: number; endOfQueueTime: number };
+  feedAudio: (data: Uint8Array) => void;
 };
 
 export function useLiveApi({
@@ -225,6 +226,12 @@ export function useLiveApi({
     };
   }, []);
 
+  const feedAudio = useCallback((data: Uint8Array) => {
+    if (audioStreamerRef.current) {
+      audioStreamerRef.current.addPCM16(data);
+    }
+  }, []);
+
   return {
     client,
     config,
@@ -237,5 +244,6 @@ export function useLiveApi({
     setIsVolumeEnabled,
     isAudioPlaying,
     getAudioStreamerState,
+    feedAudio
   };
 }
